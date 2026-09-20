@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.models import Base, Reminder, User
-from app.repository import confirm_plan, due_reminders, expire_stale_drafts, save_generated_plan, submit_quiz, supersede_plan
+from app.repository import auto_fail_overdue_tasks, confirm_plan, due_reminders, expire_stale_drafts, save_generated_plan, submit_quiz, supersede_plan
 from app.schemas import GeneratedPlan, LearningOutput, QuizQuestion, TaskDraft
 
 
@@ -69,6 +69,22 @@ def test_due_reminder_is_shown_only_for_open_task():
     reminders = due_reminders(session, datetime.now())
     assert len(reminders) == 1
     assert reminders[0][0].attempt_count == 1
+
+
+def test_overdue_task_is_auto_failed_and_reminder_is_dismissed():
+    session = make_session()
+    plan = save_generated_plan(session, make_plan())
+    confirm_plan(session, plan.id)
+    session.commit()
+
+    overdue = auto_fail_overdue_tasks(session, datetime.now())
+    session.commit()
+
+    assert [task.id for task in overdue] == [plan.tasks[0].id]
+    assert plan.tasks[0].status == "NOT_COMPLETED"
+    assert plan.tasks[0].not_completed_reason == "超过截止时间未完成"
+    assert session.scalar(select(Reminder.status)) == "DISMISSED"
+    assert auto_fail_overdue_tasks(session, datetime.now()) == []
 
 
 def test_quiz_submission_scores_and_completes_task():

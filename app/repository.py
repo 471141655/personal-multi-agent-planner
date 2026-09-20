@@ -249,6 +249,31 @@ def due_reminders(session: Session, now: datetime | None = None) -> list[tuple[R
     return rows
 
 
+def auto_fail_overdue_tasks(session: Session, now: datetime | None = None) -> list[Task]:
+    now = now or now_local()
+    rows = session.execute(
+        select(Reminder, Task)
+        .join(Task, Task.id == Reminder.task_id)
+        .where(
+            Reminder.status.in_(["PENDING", "SHOWN"]),
+            Reminder.scheduled_at <= now,
+            Task.status.notin_(["COMPLETED", "NOT_COMPLETED", "CANCELLED"]),
+        )
+        .order_by(Reminder.scheduled_at)
+    ).all()
+    overdue: list[Task] = []
+    for reminder, task in rows:
+        task.status = "NOT_COMPLETED"
+        task.not_completed_reason = "超过截止时间未完成"
+        task.completed_at = None
+        task.updated_at = now
+        reminder.status = "DISMISSED"
+        reminder.snoozed_until = None
+        overdue.append(task)
+    session.flush()
+    return overdue
+
+
 def snooze_reminder(session: Session, reminder_id: int, minutes: int) -> None:
     reminder = session.get(Reminder, reminder_id)
     if reminder and reminder.attempt_count < 3:

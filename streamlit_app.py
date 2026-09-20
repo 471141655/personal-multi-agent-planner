@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import date, datetime
+from datetime import datetime
 
 import streamlit as st
 
@@ -20,21 +20,17 @@ from app.conversation import assess_plan_request, encouraging_summary, is_new_pl
 from app.database import init_db, session_scope
 from app.repository import (
     add_message,
+    auto_fail_overdue_tasks,
     build_review_facts,
     confirm_plan,
-    dismiss_reminder,
-    due_reminders,
     expire_stale_drafts,
     get_or_create_conversation,
     get_plan,
-    latest_agent_runs,
     latest_draft,
     replace_plan_conflicts,
     recent_messages,
-    review_for_day,
     save_generated_plan,
     set_task_result,
-    snooze_reminder,
     supersede_plan,
     submit_quiz,
     tasks_for_day,
@@ -53,6 +49,13 @@ st.markdown(
     [data-testid="stMetric"] {background: #f7f8fc; border: 1px solid #e8eaf2; padding: .7rem; border-radius: .8rem;}
     .agent-chip {display:inline-block; padding:.18rem .55rem; border-radius:999px; background:#eef2ff; margin-right:.3rem; font-size:.78rem;}
     .task-card {border:1px solid #e6e8ef; border-radius:12px; padding:12px; margin-bottom:10px; background:white;}
+    .agent-hud {height:94px; display:flex; align-items:center; gap:.75rem; padding:.65rem .85rem; border-radius:14px; color:#eaf6ff; background:linear-gradient(135deg,#111827,#172554); border:1px solid #334155; overflow:hidden;}
+    .agent-avatar {width:58px; height:58px; flex:0 0 58px; border-radius:50%; background:#0f172a; border:2px solid #38bdf8; padding:7px; box-shadow:0 0 14px rgba(56,189,248,.35); animation:agentPulse 1.4s ease-in-out infinite;}
+    .agent-avatar svg {width:100%; height:100%; stroke:#7dd3fc; fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round;}
+    .agent-hud-title {font-size:.78rem; letter-spacing:.08em; color:#7dd3fc; font-weight:700;}
+    .agent-hud-message {font-size:.86rem; margin-top:.18rem; line-height:1.25;}
+    .mission-complete {color:#86efac; font-weight:800; letter-spacing:.08em;}
+    @keyframes agentPulse {50% {box-shadow:0 0 24px rgba(56,189,248,.7); transform:scale(1.025);}}
     @media (max-width: 768px) {
       .block-container {padding-left: .8rem; padding-right: .8rem;}
       div[data-testid="stHorizontalBlock"] {flex-wrap: wrap;}
@@ -148,37 +151,28 @@ def submit_quiz_callback(record_id: int, question_count: int) -> None:
         st.session_state[f"quiz_error_{record_id}"] = f"提交失败：{exc}"
 
 
-def render_reminders() -> None:
+AGENT_AVATARS = {
+    "leader": """<svg viewBox="0 0 48 48"><circle cx="24" cy="18" r="9"/><path d="M9 43c2-10 8-15 15-15s13 5 15 15M24 5v4M10 18H6m36 0h-4M13 8l3 3m19-3-3 3"/></svg>""",
+    "learning": """<svg viewBox="0 0 48 48"><path d="M7 10c7-2 12 0 17 4v28c-5-4-10-6-17-4V10Zm34 0c-7-2-12 0-17 4v28c5-4 10-6 17-4V10ZM12 17h7m-7 6h7m10-6h7m-7 6h7"/></svg>""",
+    "life": """<svg viewBox="0 0 48 48"><path d="M24 42V20M24 31c-8 0-14-5-15-13 8-1 14 3 15 10m0-2c1-8 7-13 15-12 0 8-6 14-15 14"/><circle cx="24" cy="9" r="4"/></svg>""",
+    "review": """<svg viewBox="0 0 48 48"><rect x="9" y="8" width="30" height="35" rx="4"/><path d="M18 7V4h12v3M16 20l4 4 8-9m-12 19h16"/></svg>""",
+}
+
+
+@st.fragment(run_every="30s")
+def overdue_watcher(conversation_id: int) -> None:
+    """Quietly move overdue tasks to chat instead of rendering page banners."""
     with session_scope() as session:
-        reminders = due_reminders(session)
-        rendered = [(rem.id, rem.attempt_count, task.id, task.title, task.due_at) for rem, task in reminders]
-    for reminder_id, attempt_count, task_id, title, due_at in rendered:
-        st.warning(f"⏰ 任务已逾期：{title}（截止 {due_at:%H:%M}，第 {attempt_count}/3 次提醒）")
-        a, b, c, d = st.columns(4)
-        if a.button("标记完成", key=f"rem_done_{reminder_id}"):
-            with session_scope() as session:
-                set_task_result(session, task_id, True)
-                dismiss_reminder(session, reminder_id)
-            st.rerun()
-        if b.button("15 分钟后", key=f"rem_15_{reminder_id}"):
-            with session_scope() as session:
-                snooze_reminder(session, reminder_id, 15)
-            st.rerun()
-        if c.button("20 分钟后", key=f"rem_20_{reminder_id}"):
-            with session_scope() as session:
-                snooze_reminder(session, reminder_id, 20)
-            st.rerun()
-        if d.button("忽略本次", key=f"rem_ignore_{reminder_id}"):
-            with session_scope() as session:
-                dismiss_reminder(session, reminder_id)
-            st.rerun()
-
-
-try:
-    fragment = st.fragment(run_every="30s")
-    fragment(render_reminders)()
-except TypeError:
-    render_reminders()
+        overdue = auto_fail_overdue_tasks(session)
+        for task in overdue:
+            add_message(
+                session,
+                conversation_id,
+                "assistant",
+                f"⏰ Life Agent 提醒：任务“{task.title}”已超过截止时间，系统已自动标记为未完成（原因：超过截止时间未完成）。",
+            )
+    if overdue:
+        st.rerun()
 
 
 st.title("🧭 今日智能工作台")
@@ -194,7 +188,30 @@ m1, m2, m3, m4 = st.columns(4)
 m1.metric("今日任务", len(initial_tasks))
 m2.metric("已完成", done_count)
 m3.metric("完成率", f"{round(done_count / len(initial_tasks) * 100) if initial_tasks else 0}%")
-m4.metric("默认城市", "北京")
+with m4:
+    agent_hud_slot = st.empty()
+
+
+def render_agent_hud(agent: str | None = None, message: str = "") -> None:
+    if agent is None:
+        avatar = AGENT_AVATARS["leader"]
+        title = "MISSION COMPLETE"
+        detail = "Agent 团队已就绪"
+        title_class = "mission-complete"
+    else:
+        labels = {"leader": "LEADER", "learning": "LEARNING AGENT", "life": "LIFE AGENT", "review": "REVIEW AGENT"}
+        avatar = AGENT_AVATARS.get(agent, AGENT_AVATARS["leader"])
+        title = labels.get(agent, agent.upper())
+        detail = message or "正在执行任务……"
+        title_class = "agent-hud-title"
+    agent_hud_slot.markdown(
+        f'<div class="agent-hud"><div class="agent-avatar">{avatar}</div>'
+        f'<div><div class="{title_class}">{title}</div><div class="agent-hud-message">{detail}</div></div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+render_agent_hud()
 
 
 left, center, right = st.columns([1.05, 2.0, 1.15], gap="large")
@@ -202,21 +219,19 @@ left, center, right = st.columns([1.05, 2.0, 1.15], gap="large")
 
 with left:
     st.subheader("今日任务")
-    with session_scope() as session:
-        tasks = tasks_for_day(session, today)
-        task_rows = [
-            {
-                "id": task.id,
-                "title": task.title,
-                "type": task.task_type,
-                "priority": task.priority,
-                "start": task.start_at,
-                "due": task.due_at,
-                "status": task.status,
-                "reason": task.not_completed_reason,
-            }
-            for task in tasks
-        ]
+    task_rows = [
+        {
+            "id": task.id,
+            "title": task.title,
+            "type": task.task_type,
+            "priority": task.priority,
+            "start": task.start_at,
+            "due": task.due_at,
+            "status": task.status,
+            "reason": task.not_completed_reason,
+        }
+        for task in initial_tasks
+    ]
     if not task_rows:
         st.info("还没有已确认的今日任务。")
     for task in task_rows:
@@ -234,13 +249,11 @@ with left:
 
 with right:
     st.subheader("学习进度")
-    with session_scope() as session:
-        today_tasks = tasks_for_day(session, today)
-        learning_rows = []
-        for task in today_tasks:
-            if task.learning_record:
-                record = task.learning_record
-                learning_rows.append({"task_id": task.id, "title": task.title, "record_id": record.id, "goal": record.learning_goal, "quiz": list(record.quiz_json or []), "score": record.score, "mastery": record.mastery_level})
+    learning_rows = []
+    for task in initial_tasks:
+        if task.learning_record:
+            record = task.learning_record
+            learning_rows.append({"task_id": task.id, "title": task.title, "record_id": record.id, "goal": record.learning_goal, "quiz": list(record.quiz_json or []), "score": record.score, "mastery": record.mastery_level})
     if not learning_rows:
         st.caption("确认学习计划后，这里会显示自测题。")
     for learning in learning_rows:
@@ -264,38 +277,14 @@ with right:
                 if quiz_error:
                     st.error(quiz_error)
 
-    st.subheader("Agent 状态")
-    with session_scope() as session:
-        runs = latest_agent_runs(session)
-        run_rows = [(run.agent_name, run.status, run.duration_ms, run.retry_count, run.error_code) for run in runs]
-    if not run_rows:
-        st.caption("暂无 Agent 调用记录。")
-    for name, status, duration, retries, error in run_rows:
-        icon = "✅" if status == "SUCCEEDED" else "⚠️"
-        st.markdown(f"{icon} **{name}** · {duration} ms · 重试 {retries}")
-        if error:
-            st.caption(error)
-
-    st.markdown("#### 执行阶段")
-    agent_progress_slot = st.empty()
-
-    def render_agent_trace() -> None:
-        trace = st.session_state.get("agent_trace", [])
-        if not trace:
-            agent_progress_slot.caption("生成计划时，这里会实时显示执行阶段。")
-            return
-        lines = [f"{index + 1}. **{item['label']}** · {item['message']}" for index, item in enumerate(trace)]
-        agent_progress_slot.markdown("\n\n".join(lines))
-
-    render_agent_trace()
-
-
 with center:
     st.subheader("AI 对话与计划")
     st.caption("示例：今天下班后，我想学习了解 AI 最新资讯，还想运动一个小时。")
     with session_scope() as session:
         conversation = get_or_create_conversation(session)
         conversation_id = conversation.id
+    overdue_watcher(conversation_id)
+    with session_scope() as session:
         history = [(message.role, message.content, message.created_at) for message in recent_messages(session, conversation_id, limit=50)]
         expire_stale_drafts(session, today)
         draft = latest_draft(session)
@@ -324,6 +313,8 @@ with center:
                 args=(draft_data["id"], conversation_id),
                 use_container_width=True,
             )
+        if st.button("📝 生成今日复盘", key="chat_review", use_container_width=True):
+            st.session_state["review_requested"] = True
 
     def show_chat_message(role: str, content: str, created_at: datetime) -> None:
         with chat_window:
@@ -338,13 +329,12 @@ with center:
         return message
 
     def generate_new_plan(request_text: str, initial_trace: list[dict] | None = None) -> None:
-        st.session_state["agent_trace"] = list(initial_trace or [])
-        render_agent_trace()
+        if initial_trace:
+            render_agent_hud("leader", initial_trace[-1]["message"])
         with st.spinner("Agent 团队正在生成新计划……", show_time=True):
             def show_agent_progress(agent: str, message: str) -> None:
-                labels = {"leader": "Leader", "learning": "Learning Agent", "life": "Life Agent", "scheduler": "排期与冲突检查"}
-                st.session_state["agent_trace"].append({"label": labels.get(agent, agent), "message": message})
-                render_agent_trace()
+                hud_agent = "leader" if agent == "scheduler" else agent
+                render_agent_hud(hud_agent, message)
 
             generated = PlannerOrchestrator().generate(request_text, progress=show_agent_progress)
         with st.spinner("正在保存新计划草稿……"):
@@ -367,6 +357,29 @@ with center:
                 args=(saved_plan.id, conversation_id),
                 use_container_width=True,
             )
+        render_agent_hud()
+
+    if st.session_state.pop("review_requested", False):
+        render_agent_hud("review", "正在读取今日任务与完成情况")
+        with st.spinner("Review Agent 正在生成今日复盘……", show_time=True):
+            with session_scope() as session:
+                facts = build_review_facts(tasks_for_day(session, today))
+            render_agent_hud("review", "正在分析完成率、未完成原因和学习结果")
+            output = PlannerOrchestrator().review(facts)
+            review_text = (
+                f"📝 Review Agent · 今日复盘\n\n{output.summary}\n\n"
+                + "**做得好的地方**\n"
+                + "\n".join(f"- {item}" for item in output.wins)
+                + "\n\n**主要问题**\n"
+                + "\n".join(f"- {item}" for item in output.issues)
+                + "\n\n**明日建议**\n"
+                + "\n".join(f"- {item}" for item in output.suggestions)
+            )
+            with session_scope() as session:
+                upsert_review(session, today, output, facts)
+                review_message = add_message(session, conversation_id, "assistant", review_text)
+        show_chat_message("assistant", review_text, review_message.created_at)
+        render_agent_hud()
 
     prompt = st.chat_input("告诉系统你今天想完成什么……")
     if prompt:
@@ -394,10 +407,11 @@ with center:
             else:
                 task_id, changes, clarification = parse_plan_change(prompt, draft_data["tasks"])
                 if not changes:
-                    st.session_state["agent_trace"] = [{"label": "Leader", "message": "识别为计划修改，但信息不足，未调用子 Agent"}]
-                    render_agent_trace()
+                    render_agent_hud("leader", "修改信息不足，正在请你补充")
                     save_assistant_message(clarification)
+                    render_agent_hud()
                 else:
+                    render_agent_hud("leader", "正在修改计划并重新检查冲突")
                     with session_scope() as session:
                         update_draft_task(session, task_id, changes)
                         refreshed = latest_draft(session)
@@ -407,52 +421,12 @@ with center:
                         revised_rows = plan_rows(refreshed)
                         assistant_text = plan_text(revised_rows, "已按你的要求修改计划：")
                         add_message(session, conversation_id, "assistant", assistant_text)
-                    st.session_state["agent_trace"] = [{"label": "Leader", "message": "已在本地完成计划修改，未重复调用资讯与天气工具"}]
-                    render_agent_trace()
                     st.rerun()
         else:
             actionable, clarification = assess_plan_request(prompt)
             if not actionable:
-                st.session_state["agent_trace"] = [{"label": "Leader", "message": "输入信息不足，已停止路由并向用户追问"}]
-                render_agent_trace()
+                render_agent_hud("leader", "输入信息不足，正在向你追问")
                 save_assistant_message(clarification)
+                render_agent_hud()
             else:
                 generate_new_plan(prompt)
-
-
-st.divider()
-st.subheader("今日复盘")
-if st.button("生成今日复盘", type="primary"):
-    with st.status("Review Agent 正在生成今日复盘……", expanded=True) as review_status:
-        review_status.write("正在读取今日任务与完成状态")
-        with session_scope() as session:
-            review_tasks = tasks_for_day(session, today)
-            facts = build_review_facts(review_tasks)
-        review_status.write("正在分析完成率、未完成原因和学习结果")
-        output = PlannerOrchestrator().review(facts)
-        review_status.write("正在保存复盘与明日建议")
-        with session_scope() as session:
-            upsert_review(session, today, output, facts)
-        review_status.update(label="今日复盘已生成", state="complete", expanded=False)
-
-with session_scope() as session:
-    review = review_for_day(session, today)
-    if review:
-        review_data = {"summary": review.summary, **(review.details_json or {})}
-    else:
-        review_data = None
-if review_data:
-    st.write(review_data["summary"])
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown("**做得好的地方**")
-        for item in review_data.get("wins", []):
-            st.write(f"- {item}")
-    with c2:
-        st.markdown("**主要问题**")
-        for item in review_data.get("issues", []):
-            st.write(f"- {item}")
-    with c3:
-        st.markdown("**明日建议**")
-        for item in review_data.get("suggestions", []):
-            st.write(f"- {item}")
