@@ -105,14 +105,23 @@ def _requested_exercise_minutes(user_input: str) -> int:
 
 def _clean_task_title(clause: str) -> str:
     title = clause.strip(" \t\r\n，。；,;")
-    title = re.sub(r"^(?:我)?(?:今天|今晚|周末)?(?:打算|计划|想要|想|要|准备|需要)\s*", "", title)
+    title = re.sub(
+        r"^(?:我)?(?:今天|明天|后天|今晚|明晚|周末)?"
+        r"(?:在家|在公司|在办公室)?(?:我)?"
+        r"(?:打算|计划|想要|想|要|准备|需要)?(?:先|再|然后)?\s*",
+        "",
+        title,
+    )
     return title.strip()[:120]
 
 
 def _extract_general_tasks(user_input: str, target_date: date, location: str) -> list[TaskDraft]:
     """Keep explicit work/product tasks even when the model route falls back."""
     clauses = re.split(r"[，。；,;]+|(?:还有|还想|以及|并且|同时)", user_input)
-    action_words = ("完善", "开发", "实现", "完成", "处理", "制作", "编写", "测试", "修复", "整理", "搭建", "设计")
+    action_words = (
+        "完善", "优化", "开发", "实现", "完成", "处理", "制作", "编写", "测试", "修复", "整理", "搭建", "设计",
+        "找朋友", "见朋友", "约朋友", "吃饭", "聚餐", "拜访", "购物", "采购", "办事",
+    )
     tasks: list[TaskDraft] = []
     seen: set[str] = set()
     for clause in clauses:
@@ -125,16 +134,17 @@ def _extract_general_tasks(user_input: str, target_date: date, location: str) ->
         if not title or title in seen:
             continue
         seen.add(title)
-        duration = _duration_from_text(normalized, 60)
-        placeholder = _at(target_date, "09:00")
+        is_social = any(word in normalized for word in ("找朋友", "见朋友", "约朋友", "吃饭", "聚餐", "拜访"))
+        duration = _duration_from_text(normalized, 120 if is_social else 60)
+        placeholder = _at(target_date, "12:00" if is_social else "09:00")
         tasks.append(
             TaskDraft(
                 owner_agent="leader",
                 task_type="task",
                 title=title,
-                description="根据用户原始输入保留的工作或产品任务；确认前可调整名称、时间和时长。",
+                description="根据用户原始输入保留的任务；确认前可调整名称、时间和时长。",
                 location=location,
-                priority="high",
+                priority="medium" if is_social else "high",
                 start_at=placeholder,
                 due_at=placeholder + timedelta(minutes=duration),
                 estimated_minutes=duration,
@@ -150,8 +160,8 @@ def _round_up_quarter(value: datetime) -> datetime:
 
 
 def _schedule_tasks(tasks: list[TaskDraft], target_date: date, user_input: str) -> list[TaskDraft]:
-    is_weekend = target_date.weekday() >= 5 or "周末" in user_input
-    base = _at(target_date, "09:00" if is_weekend else "18:45")
+    is_free_day = target_date.weekday() >= 5 or "周末" in user_input or any(marker in user_input for marker in ("在家", "休息", "请假"))
+    base = _at(target_date, "09:00" if is_free_day else "18:45")
     if target_date == _today():
         base = max(base, _round_up_quarter(now_local() + timedelta(minutes=15)))
     priority_order = {"high": 0, "medium": 1, "low": 2}
@@ -159,7 +169,9 @@ def _schedule_tasks(tasks: list[TaskDraft], target_date: date, user_input: str) 
     scheduled: list[TaskDraft] = []
     cursor = base
     for _, task in ordered:
-        start = cursor
+        is_social_task = any(word in task.title for word in ("找朋友", "见朋友", "约朋友", "吃饭", "聚餐", "拜访"))
+        preferred_start = task.start_at if is_social_task else cursor
+        start = max(cursor, preferred_start)
         due = start + timedelta(minutes=task.estimated_minutes)
         scheduled.append(task.model_copy(update={"start_at": start, "due_at": due}))
         cursor = due + timedelta(minutes=15)
@@ -205,6 +217,8 @@ class PlannerOrchestrator:
             target_date = date.fromisoformat(route.target_date)
         except ValueError:
             target_date = _today()
+        if any(marker in user_input for marker in ("明天", "后天")):
+            target_date = date.fromisoformat(keyword_route.target_date)
         if target_date < _today():
             target_date = _today()
 

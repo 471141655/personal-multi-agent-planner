@@ -16,7 +16,7 @@ for key in ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "DATABASE
 
 from app.agents import PlannerOrchestrator, detect_conflicts
 from app.auth import verify_password
-from app.conversation import assess_plan_request, encouraging_summary, is_new_plan_request, is_plan_confirmation, parse_plan_change, plan_text
+from app.conversation import assess_plan_request, encouraging_summary, is_new_plan_request, is_plan_confirmation, is_review_request, parse_plan_change, plan_text
 from app.database import init_db, session_scope
 from app.repository import (
     add_message,
@@ -121,20 +121,6 @@ def plan_rows(plan) -> list[dict]:
         }
         for task in plan.tasks
     ]
-
-
-def confirm_plan_in_chat_callback(plan_id: int, conversation_id: int) -> None:
-    try:
-        with session_scope() as session:
-            plan = get_plan(session, plan_id)
-            if not plan:
-                raise ValueError("计划不存在")
-            rows = plan_rows(plan)
-            confirm_plan(session, plan_id)
-            add_message(session, conversation_id, "assistant", encouraging_summary(rows))
-        set_flash("计划已确认，今日任务已经生成。")
-    except Exception as exc:
-        set_flash(f"确认失败：{exc}", "error")
 
 
 def submit_quiz_callback(record_id: int, question_count: int) -> None:
@@ -283,7 +269,6 @@ with center:
     with session_scope() as session:
         conversation = get_or_create_conversation(session)
         conversation_id = conversation.id
-    overdue_watcher(conversation_id)
     with session_scope() as session:
         history = [(message.role, message.content, message.created_at) for message in recent_messages(session, conversation_id, limit=50)]
         expire_stale_drafts(session, today)
@@ -302,19 +287,7 @@ with center:
                 st.write(content)
                 st.caption(created_at.strftime("%Y-%m-%d %H:%M"))
         if draft_data:
-            blocking = [item for item in draft_data["conflicts"] if not item.startswith("工具提示：")]
-            st.caption("当前计划正在等待你的确认或修改。")
-            st.button(
-                "确认计划并生成今日任务",
-                type="primary",
-                disabled=bool(blocking),
-                key=f"chat_confirm_{draft_data['id']}",
-                on_click=confirm_plan_in_chat_callback,
-                args=(draft_data["id"], conversation_id),
-                use_container_width=True,
-            )
-        if st.button("📝 生成今日复盘", key="chat_review", use_container_width=True):
-            st.session_state["review_requested"] = True
+            st.caption("当前计划等待确认或修改。快捷指令：确认计划")
 
     def show_chat_message(role: str, content: str, created_at: datetime) -> None:
         with chat_window:
@@ -346,20 +319,9 @@ with center:
                     assistant_text += "\n\n提示：\n" + "\n".join(f"- {item}" for item in generated.conflicts)
                 assistant_message = add_message(session, conversation_id, "assistant", assistant_text)
         show_chat_message("assistant", assistant_text, assistant_message.created_at)
-        blocking = [item for item in generated.conflicts if not item.startswith("工具提示：")]
-        with chat_window:
-            st.button(
-                "确认计划并生成今日任务",
-                type="primary",
-                disabled=bool(blocking),
-                key=f"chat_confirm_new_{saved_plan.id}",
-                on_click=confirm_plan_in_chat_callback,
-                args=(saved_plan.id, conversation_id),
-                use_container_width=True,
-            )
         render_agent_hud()
 
-    if st.session_state.pop("review_requested", False):
+    def generate_review_in_chat() -> None:
         render_agent_hud("review", "正在读取今日任务与完成情况")
         with st.spinner("Review Agent 正在生成今日复盘……", show_time=True):
             with session_scope() as session:
@@ -381,13 +343,16 @@ with center:
         show_chat_message("assistant", review_text, review_message.created_at)
         render_agent_hud()
 
-    prompt = st.chat_input("告诉系统你今天想完成什么……")
+    st.caption("快捷指令：输入“确认计划”或“生成今日复盘”")
+    prompt = st.chat_input("输入计划、修改要求或快捷指令……")
     if prompt:
         with session_scope() as session:
             user_message = add_message(session, conversation_id, "user", prompt)
         show_chat_message("user", prompt, user_message.created_at)
 
-        if draft_data:
+        if is_review_request(prompt):
+            generate_review_in_chat()
+        elif draft_data:
             blocking = [item for item in draft_data["conflicts"] if not item.startswith("工具提示：")]
             if is_plan_confirmation(prompt):
                 if blocking:
@@ -430,3 +395,6 @@ with center:
                 render_agent_hud()
             else:
                 generate_new_plan(prompt)
+
+
+overdue_watcher(conversation_id)

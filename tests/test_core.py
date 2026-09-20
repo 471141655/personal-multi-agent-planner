@@ -4,7 +4,7 @@ import app.agents as agents
 from app.agents import PlannerOrchestrator, detect_conflicts
 from app.llm import ModelUnavailable
 from app.auth import hash_password
-from app.conversation import assess_plan_request, is_new_plan_request, is_plan_confirmation, parse_plan_change
+from app.conversation import assess_plan_request, is_new_plan_request, is_plan_confirmation, is_review_request, parse_plan_change
 from app.database import normalize_database_url
 from app.schemas import TaskDraft
 
@@ -72,6 +72,25 @@ def test_weekend_fallback_keeps_all_tasks_and_explicit_duration(monkeypatch):
     assert any(agent == "scheduler" for agent, _ in updates)
 
 
+def test_tomorrow_at_home_keeps_resume_social_and_exercise_tasks(monkeypatch):
+    current_day = date(2026, 9, 20)
+    monkeypatch.setattr(agents, "_today", lambda: current_day)
+    monkeypatch.setattr(agents, "now_local", lambda: datetime(2026, 9, 20, 8, 0))
+    monkeypatch.setattr(agents, "fetch_weather", lambda *args: {"city": "北京", "condition": "晴", "precipitation_probability": 0})
+
+    plan = PlannerOrchestrator(client=UnavailableClient()).generate(
+        "我准备规划一下明天的计划，明天在家我准备先优化我的简历，找朋友吃个饭，还想运动1小时"
+    )
+
+    assert plan.target_date == "2026-09-21"
+    assert len(plan.tasks) == 3
+    assert any("优化我的简历" in task.title for task in plan.tasks)
+    assert any("找朋友吃个饭" in task.title for task in plan.tasks)
+    exercise = next(task for task in plan.tasks if task.task_type == "life")
+    assert exercise.estimated_minutes == 60
+    assert min(task.start_at.hour for task in plan.tasks) == 9
+
+
 def test_short_or_ambiguous_input_does_not_generate_plan():
     assert assess_plan_request("我")[0] is False
     assert assess_plan_request("你好")[0] is False
@@ -99,3 +118,5 @@ def test_conversational_confirmation_and_plan_change():
     assert changes["due_at"] == datetime(2026, 9, 20, 21, 0)
     assert is_new_plan_request("今天重新安排学习 Python 和运动一小时") is True
     assert is_new_plan_request("把运动改成一小时") is False
+    assert is_review_request("生成今日复盘") is True
+    assert is_review_request("我想安排明天") is False

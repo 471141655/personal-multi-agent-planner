@@ -10,6 +10,7 @@ ACTION_WORDS = (
     "阅读",
     "完成",
     "完善",
+    "优化",
     "开发",
     "实现",
     "处理",
@@ -28,6 +29,10 @@ ACTION_WORDS = (
     "提醒",
     "安排",
     "计划",
+    "找朋友",
+    "见朋友",
+    "吃饭",
+    "聚餐",
 )
 
 
@@ -51,6 +56,11 @@ def is_plan_confirmation(text: str) -> bool:
     return normalized in {"确认", "确认计划", "确认整份计划", "可以", "没问题", "按这个执行", "就这样", "开始执行"}
 
 
+def is_review_request(text: str) -> bool:
+    normalized = re.sub(r"[\s，。！!,.]", "", text or "").lower()
+    return normalized in {"生成今日复盘", "今日复盘", "复盘今天", "帮我复盘今天", "开始复盘"}
+
+
 def is_plan_change_request(text: str) -> bool:
     normalized = re.sub(r"\s+", "", text or "")
     markers = ("把", "改成", "改为", "调整", "第一个", "第二个", "第三个", "第1个", "第2个", "第3个", "提前", "推迟", "延长", "缩短", "新增", "添加", "再加", "删除", "取消第")
@@ -68,13 +78,15 @@ def is_new_plan_request(text: str) -> bool:
 def plan_text(tasks: list[dict], heading: str = "我已经整理好计划草稿：") -> str:
     ordered = sorted(tasks, key=lambda item: item["start"])
     lines = [heading]
+    if ordered:
+        lines.append(f"计划日期：{ordered[0]['start']:%Y-%m-%d}")
     for index, task in enumerate(ordered, 1):
         lines.append(
             f"{index}. {task['start']:%H:%M}–{task['due']:%H:%M}｜{task['title']}｜{task['minutes']} 分钟｜{task['priority']}"
         )
     total = sum(int(task["minutes"]) for task in ordered)
     lines.append(f"总计 {len(ordered)} 项、{total} 分钟。")
-    lines.append("回复“确认计划”即可加入今日任务；也可以直接说，例如“把运动改成 1 小时”或“把第二项改到晚上 8 点”。")
+    lines.append("输入“确认计划”即可加入任务清单；也可以直接说，例如“把运动改成 1 小时”或“把第二项改到晚上 8 点”。")
     return "\n\n".join(lines)
 
 
@@ -84,8 +96,9 @@ def encouraging_summary(tasks: list[dict]) -> str:
         return "计划已经确认。今天稳稳向前一步就很好。"
     total = sum(int(task["minutes"]) for task in ordered)
     task_names = "、".join(task["title"] for task in ordered)
+    task_date = ordered[0]["start"].strftime("%Y-%m-%d")
     return (
-        f"计划确认成功！今天共安排 {len(ordered)} 项任务，预计投入 {total} 分钟：{task_names}。"
+        f"计划确认成功！{task_date} 共安排 {len(ordered)} 项任务，预计投入 {total} 分钟：{task_names}。"
         f"第一项从 {ordered[0]['start']:%H:%M} 开始，最后一项预计在 {ordered[-1]['due']:%H:%M} 前完成。"
         "不需要追求一次做到完美，按顺序完成、及时更新状态，就是很扎实的进步。加油，今天也会是有收获的一天！"
     )
