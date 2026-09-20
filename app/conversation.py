@@ -51,6 +51,20 @@ def is_plan_confirmation(text: str) -> bool:
     return normalized in {"确认", "确认计划", "确认整份计划", "可以", "没问题", "按这个执行", "就这样", "开始执行"}
 
 
+def is_plan_change_request(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", text or "")
+    markers = ("把", "改成", "改为", "调整", "第一个", "第二个", "第三个", "第1个", "第2个", "第3个", "提前", "推迟", "延长", "缩短", "新增", "添加", "再加", "删除", "取消第")
+    return any(marker in normalized for marker in markers)
+
+
+def is_new_plan_request(text: str) -> bool:
+    actionable, _ = assess_plan_request(text)
+    if not actionable or is_plan_confirmation(text) or is_plan_change_request(text):
+        return False
+    # A complete actionable request while a draft exists starts a new planning turn.
+    return True
+
+
 def plan_text(tasks: list[dict], heading: str = "我已经整理好计划草稿：") -> str:
     ordered = sorted(tasks, key=lambda item: item["start"])
     lines = [heading]

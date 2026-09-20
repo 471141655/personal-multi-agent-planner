@@ -16,7 +16,7 @@ for key in ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "DATABASE
 
 from app.agents import PlannerOrchestrator, detect_conflicts
 from app.auth import verify_password
-from app.conversation import assess_plan_request, encouraging_summary, is_plan_confirmation, parse_plan_change, plan_text
+from app.conversation import assess_plan_request, encouraging_summary, is_new_plan_request, is_plan_confirmation, parse_plan_change, plan_text
 from app.database import init_db, session_scope
 from app.repository import (
     add_message,
@@ -24,6 +24,7 @@ from app.repository import (
     confirm_plan,
     dismiss_reminder,
     due_reminders,
+    expire_stale_drafts,
     get_or_create_conversation,
     get_plan,
     latest_agent_runs,
@@ -34,6 +35,7 @@ from app.repository import (
     save_generated_plan,
     set_task_result,
     snooze_reminder,
+    supersede_plan,
     submit_quiz,
     tasks_for_day,
     update_draft_task,
@@ -295,6 +297,7 @@ with center:
         conversation = get_or_create_conversation(session)
         conversation_id = conversation.id
         history = [(message.role, message.content, message.created_at) for message in recent_messages(session, conversation_id, limit=50)]
+        expire_stale_drafts(session, today)
         draft = latest_draft(session)
         draft_data = (
             {"id": draft.id, "conflicts": list(draft.conflict_summary or []), "tasks": plan_rows(draft)}
@@ -334,6 +337,37 @@ with center:
         show_chat_message("assistant", content, message.created_at)
         return message
 
+    def generate_new_plan(request_text: str, initial_trace: list[dict] | None = None) -> None:
+        st.session_state["agent_trace"] = list(initial_trace or [])
+        render_agent_trace()
+        with st.spinner("Agent 团队正在生成新计划……", show_time=True):
+            def show_agent_progress(agent: str, message: str) -> None:
+                labels = {"leader": "Leader", "learning": "Learning Agent", "life": "Life Agent", "scheduler": "排期与冲突检查"}
+                st.session_state["agent_trace"].append({"label": labels.get(agent, agent), "message": message})
+                render_agent_trace()
+
+            generated = PlannerOrchestrator().generate(request_text, progress=show_agent_progress)
+        with st.spinner("正在保存新计划草稿……"):
+            with session_scope() as session:
+                saved_plan = save_generated_plan(session, generated, input_summary=request_text)
+                generated_rows = plan_rows(saved_plan)
+                assistant_text = plan_text(generated_rows)
+                if generated.conflicts:
+                    assistant_text += "\n\n提示：\n" + "\n".join(f"- {item}" for item in generated.conflicts)
+                assistant_message = add_message(session, conversation_id, "assistant", assistant_text)
+        show_chat_message("assistant", assistant_text, assistant_message.created_at)
+        blocking = [item for item in generated.conflicts if not item.startswith("工具提示：")]
+        with chat_window:
+            st.button(
+                "确认计划并生成今日任务",
+                type="primary",
+                disabled=bool(blocking),
+                key=f"chat_confirm_new_{saved_plan.id}",
+                on_click=confirm_plan_in_chat_callback,
+                args=(saved_plan.id, conversation_id),
+                use_container_width=True,
+            )
+
     prompt = st.chat_input("告诉系统你今天想完成什么……")
     if prompt:
         with session_scope() as session:
@@ -352,6 +386,11 @@ with center:
                         confirm_plan(session, draft_data["id"])
                         add_message(session, conversation_id, "assistant", encouraging_summary(rows))
                     st.rerun()
+            elif is_new_plan_request(prompt):
+                with session_scope() as session:
+                    supersede_plan(session, draft_data["id"])
+                    add_message(session, conversation_id, "assistant", "识别到这是新的计划请求，旧的未确认草稿已停止，正在为你重新规划。")
+                generate_new_plan(prompt, [{"label": "Leader", "message": f"新计划请求已替代旧草稿 #{draft_data['id']}"}])
             else:
                 task_id, changes, clarification = parse_plan_change(prompt, draft_data["tasks"])
                 if not changes:
@@ -378,34 +417,7 @@ with center:
                 render_agent_trace()
                 save_assistant_message(clarification)
             else:
-                st.session_state["agent_trace"] = []
-                with st.spinner("Agent 团队正在生成计划……", show_time=True):
-                    def show_agent_progress(agent: str, message: str) -> None:
-                        labels = {"leader": "Leader", "learning": "Learning Agent", "life": "Life Agent", "scheduler": "排期与冲突检查"}
-                        st.session_state["agent_trace"].append({"label": labels.get(agent, agent), "message": message})
-                        render_agent_trace()
-
-                    generated = PlannerOrchestrator().generate(prompt, progress=show_agent_progress)
-                with st.spinner("正在保存计划草稿……"):
-                    with session_scope() as session:
-                        saved_plan = save_generated_plan(session, generated)
-                        generated_rows = plan_rows(saved_plan)
-                        assistant_text = plan_text(generated_rows)
-                        if generated.conflicts:
-                            assistant_text += "\n\n提示：\n" + "\n".join(f"- {item}" for item in generated.conflicts)
-                        assistant_message = add_message(session, conversation_id, "assistant", assistant_text)
-                show_chat_message("assistant", assistant_text, assistant_message.created_at)
-                blocking = [item for item in generated.conflicts if not item.startswith("工具提示：")]
-                with chat_window:
-                    st.button(
-                        "确认计划并生成今日任务",
-                        type="primary",
-                        disabled=bool(blocking),
-                        key=f"chat_confirm_new_{saved_plan.id}",
-                        on_click=confirm_plan_in_chat_callback,
-                        args=(saved_plan.id, conversation_id),
-                        use_container_width=True,
-                    )
+                generate_new_plan(prompt)
 
 
 st.divider()

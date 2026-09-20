@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.models import Base, Reminder, User
-from app.repository import confirm_plan, due_reminders, save_generated_plan, submit_quiz
+from app.repository import confirm_plan, due_reminders, expire_stale_drafts, save_generated_plan, submit_quiz, supersede_plan
 from app.schemas import GeneratedPlan, LearningOutput, QuizQuestion, TaskDraft
 
 
@@ -80,3 +80,18 @@ def test_quiz_submission_scores_and_completes_task():
     assert result.mastery_level == "基本掌握"
     assert result.task.status == "COMPLETED"
 
+
+def test_old_draft_is_expired_and_current_draft_can_be_superseded():
+    session = make_session()
+    old_plan = make_plan()
+    old_plan.target_date = (date.today() - timedelta(days=1)).isoformat()
+    saved_old = save_generated_plan(session, old_plan)
+    session.commit()
+    assert expire_stale_drafts(session, date.today()) == 1
+    assert saved_old.status == "EXPIRED"
+
+    current_plan = make_plan().model_copy(update={"request_id": "request-current"})
+    saved_current = save_generated_plan(session, current_plan)
+    supersede_plan(session, saved_current.id)
+    session.commit()
+    assert saved_current.status == "SUPERSEDED"

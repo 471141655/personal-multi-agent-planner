@@ -45,7 +45,12 @@ def _fallback_route(user_input: str) -> RouteDecision:
     if not intents:
         intents.append("task")
     city = next((candidate for candidate in KNOWN_CITIES if candidate in user_input), "北京")
-    return RouteDecision(intents=intents, location=city, target_date=_today().isoformat(), rationale="关键词安全路由")
+    target_date = _today()
+    if "后天" in user_input:
+        target_date += timedelta(days=2)
+    elif "明天" in user_input:
+        target_date += timedelta(days=1)
+    return RouteDecision(intents=intents, location=city, target_date=target_date.isoformat(), rationale="关键词安全路由")
 
 
 def _fallback_learning(news: list[NewsItem]) -> LearningOutput:

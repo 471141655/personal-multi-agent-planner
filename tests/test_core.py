@@ -4,7 +4,7 @@ import app.agents as agents
 from app.agents import PlannerOrchestrator, detect_conflicts
 from app.llm import ModelUnavailable
 from app.auth import hash_password
-from app.conversation import assess_plan_request, is_plan_confirmation, parse_plan_change
+from app.conversation import assess_plan_request, is_new_plan_request, is_plan_confirmation, parse_plan_change
 from app.database import normalize_database_url
 from app.schemas import TaskDraft
 
@@ -97,3 +97,5 @@ def test_conversational_confirmation_and_plan_change():
     assert changes["estimated_minutes"] == 60
     assert changes["start_at"] == datetime(2026, 9, 20, 20, 0)
     assert changes["due_at"] == datetime(2026, 9, 20, 21, 0)
+    assert is_new_plan_request("今天重新安排学习 Python 和运动一小时") is True
+    assert is_new_plan_request("把运动改成一小时") is False

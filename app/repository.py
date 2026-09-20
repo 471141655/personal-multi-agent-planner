@@ -10,7 +10,7 @@ from app.schemas import GeneratedPlan, ReviewOutput, TaskDraft
 from app.timeutils import now_local
 
 
-def save_generated_plan(session: Session, generated: GeneratedPlan, user_id: int = 1) -> Plan:
+def save_generated_plan(session: Session, generated: GeneratedPlan, user_id: int = 1, input_summary: str = "") -> Plan:
     existing = session.scalar(select(Plan).where(Plan.request_id == generated.request_id))
     if existing:
         return existing
@@ -59,7 +59,7 @@ def save_generated_plan(session: Session, generated: GeneratedPlan, user_id: int
             AgentRun(
                 request_id=generated.request_id,
                 agent_name=run["agent_name"],
-                input_summary="",
+                input_summary=input_summary[:500],
                 output_json=run.get("output_json", {}),
                 status=run["status"],
                 retry_count=run.get("retry_count", 0),
@@ -105,6 +105,32 @@ def latest_draft(session: Session, user_id: int = 1) -> Plan | None:
         .order_by(Plan.created_at.desc())
         .limit(1)
     )
+
+
+def expire_stale_drafts(session: Session, before_date: date, user_id: int = 1) -> int:
+    plans = list(
+        session.scalars(
+            select(Plan).where(
+                Plan.user_id == user_id,
+                Plan.status == "WAITING_CONFIRMATION",
+                Plan.target_date < before_date,
+            )
+        )
+    )
+    for plan in plans:
+        plan.status = "EXPIRED"
+    session.flush()
+    return len(plans)
+
+
+def supersede_plan(session: Session, plan_id: int) -> Plan:
+    plan = session.get(Plan, plan_id)
+    if not plan:
+        raise ValueError("计划不存在")
+    if plan.status == "WAITING_CONFIRMATION":
+        plan.status = "SUPERSEDED"
+        session.flush()
+    return plan
 
 
 def get_plan(session: Session, plan_id: int) -> Plan | None:
