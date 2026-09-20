@@ -4,8 +4,8 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.models import Base, Reminder, User
-from app.repository import auto_fail_overdue_tasks, confirm_plan, due_reminders, expire_stale_drafts, save_generated_plan, submit_quiz, supersede_plan
+from app.models import Base, Message, Reminder, User
+from app.repository import auto_fail_overdue_tasks, confirm_plan, due_reminders, ensure_rollover_prompt, expire_stale_drafts, get_or_create_conversation, learning_progress_summary, save_generated_plan, set_task_result, submit_quiz, supersede_plan
 from app.schemas import GeneratedPlan, LearningOutput, QuizQuestion, TaskDraft
 
 
@@ -90,11 +90,35 @@ def test_overdue_task_is_auto_failed_and_reminder_is_dismissed():
 def test_quiz_submission_scores_and_completes_task():
     session = make_session()
     plan = save_generated_plan(session, make_plan())
+    confirm_plan(session, plan.id)
     record = plan.tasks[0].learning_record
     result = submit_quiz(session, record.id, [0, 1, 3])
     assert result.score == 2
     assert result.mastery_level == "基本掌握"
     assert result.task.status == "COMPLETED"
+    summary = learning_progress_summary(session)
+    assert summary["total"] == 1
+    assert summary["assessed"] == 1
+    assert summary["average_score"] == 2.0
+
+
+def test_rollover_prompt_is_created_once_without_moving_history():
+    session = make_session()
+    yesterday = date.today() - timedelta(days=1)
+    generated = make_plan()
+    generated.target_date = yesterday.isoformat()
+    generated.tasks[0].start_at = datetime.combine(yesterday, datetime.min.time()) + timedelta(hours=9)
+    generated.tasks[0].due_at = generated.tasks[0].start_at + timedelta(hours=1)
+    plan = save_generated_plan(session, generated)
+    confirm_plan(session, plan.id)
+    set_task_result(session, plan.tasks[0].id, False, "时间不足")
+    conversation = get_or_create_conversation(session)
+
+    assert ensure_rollover_prompt(session, conversation.id, date.today()) is not None
+    assert ensure_rollover_prompt(session, conversation.id, date.today()) is None
+    assert session.scalar(select(func.count()).select_from(Message)) == 1
+    assert plan.tasks[0].start_at.date() == yesterday
+    assert plan.tasks[0].status == "NOT_COMPLETED"
 
 
 def test_old_draft_is_expired_and_current_draft_can_be_superseded():

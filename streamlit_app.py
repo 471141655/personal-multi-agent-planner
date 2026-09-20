@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import streamlit as st
 
@@ -16,17 +16,19 @@ for key in ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "DATABASE
 
 from app.agents import PlannerOrchestrator, detect_conflicts
 from app.auth import verify_password
-from app.conversation import assess_plan_request, encouraging_summary, is_new_plan_request, is_plan_confirmation, is_review_request, parse_plan_change, plan_text
+from app.conversation import assess_plan_request, encouraging_summary, is_new_plan_request, is_plan_confirmation, is_review_request, parse_plan_change, plan_text, schedule_basis, schedule_clarification
 from app.database import init_db, session_scope
 from app.repository import (
     add_message,
     auto_fail_overdue_tasks,
     build_review_facts,
     confirm_plan,
+    ensure_rollover_prompt,
     expire_stale_drafts,
     get_or_create_conversation,
     get_plan,
     latest_draft,
+    learning_progress_summary,
     replace_plan_conflicts,
     recent_messages,
     save_generated_plan,
@@ -161,17 +163,37 @@ def overdue_watcher(conversation_id: int) -> None:
         st.rerun()
 
 
-st.title("🧭 今日智能工作台")
+st.title("🧭 智能工作台")
 flash = st.session_state.pop("flash_message", None)
 if flash:
     level, message = flash
     (st.error if level == "error" else st.success)(message)
 today = today_local()
+navigation_date = st.session_state.pop("navigate_to_date", None)
+if navigation_date:
+    navigation_date = datetime.fromisoformat(navigation_date).date()
+    if navigation_date == today - timedelta(days=1):
+        st.session_state["date_choice"] = "昨日"
+    elif navigation_date == today:
+        st.session_state["date_choice"] = "今日"
+    elif navigation_date == today + timedelta(days=1):
+        st.session_state["date_choice"] = "明日"
+    else:
+        st.session_state["date_choice"] = "选择日期"
+        st.session_state["custom_task_date"] = navigation_date
+date_choice = st.radio("查看日期", ["昨日", "今日", "明日", "选择日期"], index=1, horizontal=True, label_visibility="collapsed", key="date_choice")
+date_lookup = {"昨日": today - timedelta(days=1), "今日": today, "明日": today + timedelta(days=1)}
+if date_choice == "选择日期":
+    selected_date = st.date_input("选择要查看的日期", value=st.session_state.get("custom_task_date", today), key="custom_task_date")
+else:
+    selected_date = date_lookup[date_choice]
+date_title = "今日" if selected_date == today else "明日" if selected_date == today + timedelta(days=1) else "昨日" if selected_date == today - timedelta(days=1) else selected_date.strftime("%m 月 %d 日")
 with session_scope() as session:
-    initial_tasks = tasks_for_day(session, today)
+    initial_tasks = tasks_for_day(session, selected_date)
+    cumulative_learning = learning_progress_summary(session)
 done_count = sum(task.status == "COMPLETED" for task in initial_tasks)
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("今日任务", len(initial_tasks))
+m1.metric(f"{date_title}任务", len(initial_tasks))
 m2.metric("已完成", done_count)
 m3.metric("完成率", f"{round(done_count / len(initial_tasks) * 100) if initial_tasks else 0}%")
 with m4:
@@ -204,7 +226,7 @@ left, center, right = st.columns([1.05, 2.0, 1.15], gap="large")
 
 
 with left:
-    st.subheader("今日任务")
+    st.subheader(f"{date_title}任务")
     task_rows = [
         {
             "id": task.id,
@@ -219,7 +241,7 @@ with left:
         for task in initial_tasks
     ]
     if not task_rows:
-        st.info("还没有已确认的今日任务。")
+        st.info(f"还没有已确认的{date_title}任务。")
     for task in task_rows:
         with st.container(border=True):
             st.markdown(f"**{task['title']}**")
@@ -234,7 +256,13 @@ with left:
 
 
 with right:
-    st.subheader("学习进度")
+    st.subheader("累计学习进度")
+    p1, p2 = st.columns(2)
+    p1.metric("学习次数", cumulative_learning["total"])
+    p2.metric("连续学习", f"{cumulative_learning['streak']} 天")
+    score_text = f"{cumulative_learning['average_score']}/3" if cumulative_learning["average_score"] is not None else "未评估"
+    st.caption(f"已完成自测 {cumulative_learning['assessed']} 次 · 平均 {score_text} · 最近掌握度：{cumulative_learning['latest_mastery']}")
+    st.markdown(f"#### {date_title}学习")
     learning_rows = []
     for task in initial_tasks:
         if task.learning_record:
@@ -269,6 +297,7 @@ with center:
     with session_scope() as session:
         conversation = get_or_create_conversation(session)
         conversation_id = conversation.id
+        ensure_rollover_prompt(session, conversation_id, today)
     with session_scope() as session:
         history = [(message.role, message.content, message.created_at) for message in recent_messages(session, conversation_id, limit=50)]
         expire_stale_drafts(session, today)
@@ -315,6 +344,9 @@ with center:
                 saved_plan = save_generated_plan(session, generated, input_summary=request_text)
                 generated_rows = plan_rows(saved_plan)
                 assistant_text = plan_text(generated_rows)
+                basis = schedule_basis(request_text)
+                if basis:
+                    assistant_text += "\n\n**排期依据**\n" + "\n".join(f"- {item}" for item in basis)
                 if generated.conflicts:
                     assistant_text += "\n\n提示：\n" + "\n".join(f"- {item}" for item in generated.conflicts)
                 assistant_message = add_message(session, conversation_id, "assistant", assistant_text)
@@ -350,8 +382,25 @@ with center:
             user_message = add_message(session, conversation_id, "user", prompt)
         show_chat_message("user", prompt, user_message.created_at)
 
+        pending_request = st.session_state.get("pending_plan_request")
         if is_review_request(prompt):
+            st.session_state.pop("pending_plan_request", None)
+            st.session_state.pop("pending_supersede_plan_id", None)
             generate_review_in_chat()
+        elif pending_request:
+            if prompt.strip() in {"取消", "不用了", "算了"}:
+                st.session_state.pop("pending_plan_request", None)
+                st.session_state.pop("pending_supersede_plan_id", None)
+                save_assistant_message("已取消这次计划生成，不会修改现有任务。")
+            else:
+                combined_request = f"{pending_request}\n补充信息：{prompt}"
+                old_plan_id = st.session_state.pop("pending_supersede_plan_id", None)
+                st.session_state.pop("pending_plan_request", None)
+                if old_plan_id:
+                    with session_scope() as session:
+                        supersede_plan(session, old_plan_id)
+                        add_message(session, conversation_id, "assistant", "时间信息已补充，旧的未确认草稿已停止，正在重新规划。")
+                generate_new_plan(combined_request, [{"label": "Leader", "message": "已获取可用时间，开始生成计划"}])
         elif draft_data:
             blocking = [item for item in draft_data["conflicts"] if not item.startswith("工具提示：")]
             if is_plan_confirmation(prompt):
@@ -363,12 +412,21 @@ with center:
                         rows = plan_rows(plan)
                         confirm_plan(session, draft_data["id"])
                         add_message(session, conversation_id, "assistant", encouraging_summary(rows))
+                        st.session_state["navigate_to_date"] = plan.target_date.isoformat()
                     st.rerun()
             elif is_new_plan_request(prompt):
-                with session_scope() as session:
-                    supersede_plan(session, draft_data["id"])
-                    add_message(session, conversation_id, "assistant", "识别到这是新的计划请求，旧的未确认草稿已停止，正在为你重新规划。")
-                generate_new_plan(prompt, [{"label": "Leader", "message": f"新计划请求已替代旧草稿 #{draft_data['id']}"}])
+                time_question = schedule_clarification(prompt)
+                if time_question:
+                    st.session_state["pending_plan_request"] = prompt
+                    st.session_state["pending_supersede_plan_id"] = draft_data["id"]
+                    render_agent_hud("leader", "可用时间不足，暂不调用子 Agent")
+                    save_assistant_message(time_question)
+                    render_agent_hud()
+                else:
+                    with session_scope() as session:
+                        supersede_plan(session, draft_data["id"])
+                        add_message(session, conversation_id, "assistant", "识别到这是新的计划请求，旧的未确认草稿已停止，正在为你重新规划。")
+                    generate_new_plan(prompt, [{"label": "Leader", "message": f"新计划请求已替代旧草稿 #{draft_data['id']}"}])
             else:
                 task_id, changes, clarification = parse_plan_change(prompt, draft_data["tasks"])
                 if not changes:
@@ -394,7 +452,14 @@ with center:
                 save_assistant_message(clarification)
                 render_agent_hud()
             else:
-                generate_new_plan(prompt)
+                time_question = schedule_clarification(prompt)
+                if time_question:
+                    st.session_state["pending_plan_request"] = prompt
+                    render_agent_hud("leader", "可用时间不足，暂不调用子 Agent")
+                    save_assistant_message(time_question)
+                    render_agent_hud()
+                else:
+                    generate_new_plan(prompt)
 
 
 overdue_watcher(conversation_id)

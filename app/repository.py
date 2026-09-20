@@ -190,6 +190,63 @@ def tasks_for_day(session: Session, target_date: date, user_id: int = 1) -> list
     )
 
 
+def unfinished_tasks_for_day(session: Session, target_date: date, user_id: int = 1) -> list[Task]:
+    return [task for task in tasks_for_day(session, target_date, user_id) if task.status == "NOT_COMPLETED"]
+
+
+def ensure_rollover_prompt(session: Session, conversation_id: int, target_date: date, user_id: int = 1) -> Message | None:
+    yesterday = target_date - timedelta(days=1)
+    unfinished = unfinished_tasks_for_day(session, yesterday, user_id)
+    if not unfinished:
+        return None
+    prefix = f"📌 昨日任务衔接（{yesterday.isoformat()}）："
+    existing = session.scalar(
+        select(Message.id).where(
+            Message.conversation_id == conversation_id,
+            Message.role == "assistant",
+            Message.content.like(f"{prefix}%"),
+        )
+    )
+    if existing:
+        return None
+    titles = "、".join(f"“{task.title}”" for task in unfinished)
+    return add_message(
+        session,
+        conversation_id,
+        "assistant",
+        f"{prefix}有 {len(unfinished)} 项未完成：{titles}。这些历史记录不会自动改动；如需重新安排，请告诉我新的日期和可开始时间。",
+    )
+
+
+def learning_progress_summary(session: Session, user_id: int = 1) -> dict:
+    records = list(
+        session.scalars(
+            select(LearningRecord)
+            .join(Task, Task.id == LearningRecord.task_id)
+            .join(Plan, Plan.id == Task.plan_id)
+            .where(Plan.user_id == user_id, Plan.status == "CONFIRMED")
+            .order_by(LearningRecord.submitted_at.desc())
+        )
+    )
+    assessed = [record for record in records if record.score is not None]
+    completed_dates = sorted({record.submitted_at.date() for record in assessed if record.submitted_at}, reverse=True)
+    streak = 0
+    if completed_dates:
+        cursor = completed_dates[0]
+        for completed_date in completed_dates:
+            if completed_date != cursor:
+                break
+            streak += 1
+            cursor -= timedelta(days=1)
+    return {
+        "total": len(records),
+        "assessed": len(assessed),
+        "average_score": round(sum(record.score for record in assessed) / len(assessed), 1) if assessed else None,
+        "latest_mastery": assessed[0].mastery_level if assessed else "未评估",
+        "streak": streak,
+    }
+
+
 def set_task_result(session: Session, task_id: int, completed: bool, reason: str | None = None) -> Task:
     task = session.get(Task, task_id)
     if not task:

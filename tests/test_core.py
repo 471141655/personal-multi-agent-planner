@@ -4,7 +4,7 @@ import app.agents as agents
 from app.agents import PlannerOrchestrator, detect_conflicts
 from app.llm import ModelUnavailable
 from app.auth import hash_password
-from app.conversation import assess_plan_request, is_new_plan_request, is_plan_confirmation, is_review_request, parse_plan_change
+from app.conversation import assess_plan_request, is_new_plan_request, is_plan_confirmation, is_review_request, parse_plan_change, schedule_basis, schedule_clarification
 from app.database import normalize_database_url
 from app.schemas import TaskDraft
 
@@ -89,6 +89,21 @@ def test_tomorrow_at_home_keeps_resume_social_and_exercise_tasks(monkeypatch):
     exercise = next(task for task in plan.tasks if task.task_type == "life")
     assert exercise.estimated_minutes == 60
     assert min(task.start_at.hour for task in plan.tasks) == 9
+
+
+def test_contextual_scheduling_asks_once_then_uses_answer(monkeypatch):
+    request = "明天在家优化简历，找朋友吃饭，运动1小时"
+    assert "几点" in schedule_clarification(request)
+    combined = request + "\n补充信息：上午11点开始"
+    assert schedule_clarification(combined) == ""
+    assert any("不套用" in item for item in schedule_basis(combined))
+
+    current_day = date(2026, 9, 20)
+    monkeypatch.setattr(agents, "_today", lambda: current_day)
+    monkeypatch.setattr(agents, "now_local", lambda: datetime(2026, 9, 20, 8, 0))
+    monkeypatch.setattr(agents, "fetch_weather", lambda *args: {"city": "北京", "condition": "晴", "precipitation_probability": 0})
+    plan = PlannerOrchestrator(client=UnavailableClient()).generate(combined)
+    assert min(task.start_at for task in plan.tasks) == datetime(2026, 9, 21, 11, 0)
 
 
 def test_short_or_ambiguous_input_does_not_generate_plan():

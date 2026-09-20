@@ -48,7 +48,7 @@ def _fallback_route(user_input: str) -> RouteDecision:
     target_date = _today()
     if "后天" in user_input:
         target_date += timedelta(days=2)
-    elif "明天" in user_input:
+    elif "明天" in user_input or "明晚" in user_input:
         target_date += timedelta(days=1)
     return RouteDecision(intents=intents, location=city, target_date=target_date.isoformat(), rationale="关键词安全路由")
 
@@ -159,9 +159,30 @@ def _round_up_quarter(value: datetime) -> datetime:
     return value if remainder == 0 else value + timedelta(minutes=15 - remainder)
 
 
+def _explicit_plan_start(user_input: str, target_date: date) -> datetime | None:
+    match = re.search(
+        r"(?:从|可以从|可从|补充信息：)?\s*(早上|上午|中午|下午|晚上)?\s*"
+        r"(\d{1,2})(?:[:：](\d{2})|点(?:(\d{1,2})分?)?)\s*(?:开始|以后|之后)",
+        user_input,
+    )
+    if not match:
+        return None
+    period, hour_text, minute_a, minute_b = match.groups()
+    hour = int(hour_text)
+    minute = int(minute_a or minute_b or 0)
+    if period in {"下午", "晚上"} and hour < 12:
+        hour += 12
+    if period == "中午" and hour < 11:
+        hour += 12
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        return None
+    return datetime.combine(target_date, dt_time(hour, minute))
+
+
 def _schedule_tasks(tasks: list[TaskDraft], target_date: date, user_input: str) -> list[TaskDraft]:
-    is_free_day = target_date.weekday() >= 5 or "周末" in user_input or any(marker in user_input for marker in ("在家", "休息", "请假"))
-    base = _at(target_date, "09:00" if is_free_day else "18:45")
+    is_free_day = target_date.weekday() >= 5 or "周末" in user_input or any(marker in user_input for marker in ("在家", "休息", "请假", "全天", "随时"))
+    explicit_start = _explicit_plan_start(user_input, target_date)
+    base = explicit_start or _at(target_date, "09:00" if is_free_day else "18:45")
     if target_date == _today():
         base = max(base, _round_up_quarter(now_local() + timedelta(minutes=15)))
     priority_order = {"high": 0, "medium": 1, "low": 2}
@@ -217,7 +238,7 @@ class PlannerOrchestrator:
             target_date = date.fromisoformat(route.target_date)
         except ValueError:
             target_date = _today()
-        if any(marker in user_input for marker in ("明天", "后天")):
+        if any(marker in user_input for marker in ("明天", "明晚", "后天")):
             target_date = date.fromisoformat(keyword_route.target_date)
         if target_date < _today():
             target_date = _today()

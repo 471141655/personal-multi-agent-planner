@@ -51,6 +51,45 @@ def assess_plan_request(text: str) -> tuple[bool, str]:
     return True, ""
 
 
+def schedule_clarification(text: str) -> str:
+    """Ask once when a plan has no trustworthy availability window."""
+    normalized = re.sub(r"\s+", "", text or "")
+    availability_markers = ("下班后", "放学后", "全天", "随时")
+    has_start_time = bool(
+        re.search(
+            r"(?:从|可以从|可从|早上|上午|中午|下午|晚上)?"
+            r"\d{1,2}(?::\d{2}|：\d{2}|点(?:\d{1,2}分)?)\s*(?:开始|以后|之后)",
+            normalized,
+        )
+    )
+    if has_start_time or any(marker in normalized for marker in availability_markers):
+        return ""
+    if any(marker in normalized for marker in ("在家", "休息", "请假", "周末")):
+        return "我已识别到这天不按默认上班日排期。你希望从几点开始安排这些事？"
+    if any(marker in normalized for marker in ("明天", "后天")):
+        return "为了避免套用默认工作时间，请告诉我那天可以从几点开始，或直接说“下班后”。"
+    return "你希望从几点开始安排？也可以告诉我“下班后”或“今晚”。"
+
+
+def schedule_basis(text: str) -> list[str]:
+    normalized = re.sub(r"\s+", "", text or "")
+    basis: list[str] = []
+    if "后天" in normalized:
+        basis.append("目标日期为后天")
+    elif "明天" in normalized or "明晚" in normalized:
+        basis.append("目标日期为明天")
+    else:
+        basis.append("目标日期为今天")
+    if any(marker in normalized for marker in ("在家", "休息", "请假", "周末")):
+        basis.append("当天不套用默认上下班时间")
+    elif "下班后" in normalized:
+        basis.append("从下班通勤后开始")
+    match = re.search(r"((?:早上|上午|下午|晚上)?\d{1,2}(?::\d{2}|：\d{2}|点(?:\d{1,2}分)?))", normalized)
+    if match:
+        basis.append(f"按你提供的时间 {match.group(1)} 排期")
+    return basis
+
+
 def is_plan_confirmation(text: str) -> bool:
     normalized = re.sub(r"[\s，。！!,.]", "", text or "").lower()
     return normalized in {"确认", "确认计划", "确认整份计划", "可以", "没问题", "按这个执行", "就这样", "开始执行"}
