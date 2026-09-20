@@ -1,6 +1,8 @@
 from datetime import date, datetime, timedelta
 
-from app.agents import detect_conflicts
+import app.agents as agents
+from app.agents import PlannerOrchestrator, detect_conflicts
+from app.llm import ModelUnavailable
 from app.auth import hash_password
 from app.database import normalize_database_url
 from app.schemas import TaskDraft
@@ -39,3 +41,31 @@ def test_password_hash_is_stable():
     assert hash_password("secret") == hash_password("secret")
     assert hash_password("secret") != hash_password("different")
 
+
+class UnavailableClient:
+    def structured(self, *args, **kwargs):
+        raise ModelUnavailable("test fallback")
+
+
+def test_weekend_fallback_keeps_all_tasks_and_explicit_duration(monkeypatch):
+    target_day = date(2026, 9, 20)  # Sunday
+    monkeypatch.setattr(agents, "_today", lambda: target_day)
+    monkeypatch.setattr(agents, "now_local", lambda: datetime(2026, 9, 20, 8, 0))
+    monkeypatch.setattr(agents, "fetch_ai_news", lambda: ([], []))
+    monkeypatch.setattr(agents, "fetch_weather", lambda *args: {"city": "北京", "condition": "晴", "precipitation_probability": 0})
+    updates = []
+
+    plan = PlannerOrchestrator(client=UnavailableClient()).generate(
+        "今天是周末，我打算完善我的智能工作台，学习了解AI最新资讯，还有完善回忆录软件系统的语音转文字转剧本的功能模块，还想运动2小时",
+        progress=lambda agent, message: updates.append((agent, message)),
+    )
+
+    titles = [task.title for task in plan.tasks]
+    assert any("智能工作台" in title for title in titles)
+    assert any("回忆录软件系统" in title for title in titles)
+    assert any(task.task_type == "learning" for task in plan.tasks)
+    exercise = next(task for task in plan.tasks if task.task_type == "life")
+    assert exercise.estimated_minutes == 120
+    assert exercise.start_at.hour != 19
+    assert len(plan.tasks) == 4
+    assert any(agent == "scheduler" for agent, _ in updates)

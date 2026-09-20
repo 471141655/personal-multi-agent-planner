@@ -187,8 +187,14 @@ with center:
     if prompt:
         with session_scope() as session:
             add_message(session, conversation_id, "user", prompt)
-        with st.spinner("Leader 正在路由，子 Agent 正在准备计划……"):
-            generated = PlannerOrchestrator().generate(prompt)
+        with st.status("Leader 正在解析你的完整需求……", expanded=True) as agent_status:
+            def show_agent_progress(agent: str, message: str) -> None:
+                labels = {"leader": "Leader", "learning": "Learning Agent", "life": "Life Agent", "scheduler": "排期与冲突检查"}
+                agent_status.write(f"**{labels.get(agent, agent)}** · {message}")
+
+            generated = PlannerOrchestrator().generate(prompt, progress=show_agent_progress)
+            agent_status.update(label=f"计划已生成：共 {len(generated.tasks)} 个任务", state="complete", expanded=False)
+        with st.spinner("正在保存计划草稿……"):
             with session_scope() as session:
                 save_generated_plan(session, generated)
                 task_names = "、".join(task.title for task in generated.tasks)
