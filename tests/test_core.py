@@ -4,6 +4,7 @@ import app.agents as agents
 from app.agents import PlannerOrchestrator, detect_conflicts
 from app.llm import ModelUnavailable
 from app.auth import hash_password
+from app.conversation import assess_plan_request, is_plan_confirmation, parse_plan_change
 from app.database import normalize_database_url
 from app.schemas import TaskDraft
 
@@ -69,3 +70,30 @@ def test_weekend_fallback_keeps_all_tasks_and_explicit_duration(monkeypatch):
     assert exercise.start_at.hour != 19
     assert len(plan.tasks) == 4
     assert any(agent == "scheduler" for agent, _ in updates)
+
+
+def test_short_or_ambiguous_input_does_not_generate_plan():
+    assert assess_plan_request("我")[0] is False
+    assert assess_plan_request("你好")[0] is False
+    assert assess_plan_request("随便聊聊")[0] is False
+    assert assess_plan_request("今天学习 AI 资讯 1 小时")[0] is True
+
+
+def test_conversational_confirmation_and_plan_change():
+    tasks = [
+        {
+            "id": 10,
+            "title": "完成 2 小时运动",
+            "start": datetime(2026, 9, 20, 14, 0),
+            "due": datetime(2026, 9, 20, 16, 0),
+            "minutes": 120,
+            "priority": "low",
+        }
+    ]
+    assert is_plan_confirmation("确认计划") is True
+    task_id, changes, clarification = parse_plan_change("把运动改到晚上8点，时长1小时", tasks)
+    assert clarification == ""
+    assert task_id == 10
+    assert changes["estimated_minutes"] == 60
+    assert changes["start_at"] == datetime(2026, 9, 20, 20, 0)
+    assert changes["due_at"] == datetime(2026, 9, 20, 21, 0)

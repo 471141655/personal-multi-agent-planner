@@ -16,6 +16,7 @@ for key in ["DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL", "DATABASE
 
 from app.agents import PlannerOrchestrator, detect_conflicts
 from app.auth import verify_password
+from app.conversation import assess_plan_request, encouraging_summary, is_plan_confirmation, parse_plan_change, plan_text
 from app.database import init_db, session_scope
 from app.repository import (
     add_message,
@@ -24,6 +25,7 @@ from app.repository import (
     dismiss_reminder,
     due_reminders,
     get_or_create_conversation,
+    get_plan,
     latest_agent_runs,
     latest_draft,
     replace_plan_conflicts,
@@ -102,45 +104,30 @@ def update_task_result_callback(task_id: int, completed: bool, reason_key: str |
         set_flash(f"更新失败：{exc}", "error")
 
 
-def start_editing_task(task_id: int) -> None:
-    for prefix in ["title", "start", "due", "duration", "priority"]:
-        st.session_state.pop(f"draft_{prefix}_{task_id}", None)
-    st.session_state["editing_task_id"] = task_id
-
-
-def stop_editing_task() -> None:
-    st.session_state["editing_task_id"] = None
-
-
-def save_draft_task_callback(task_id: int, target_date: date) -> None:
-    try:
-        start_at = datetime.combine(target_date, st.session_state[f"draft_start_{task_id}"])
-        due_at = datetime.combine(target_date, st.session_state[f"draft_due_{task_id}"])
-        values = {
-            "title": st.session_state[f"draft_title_{task_id}"],
-            "start_at": start_at,
-            "due_at": due_at,
-            "estimated_minutes": int(st.session_state[f"draft_duration_{task_id}"]),
-            "priority": st.session_state[f"draft_priority_{task_id}"],
+def plan_rows(plan) -> list[dict]:
+    return [
+        {
+            "id": task.id,
+            "title": task.title,
+            "start": task.start_at,
+            "due": task.due_at,
+            "minutes": task.estimated_minutes,
+            "priority": task.priority,
         }
-        with session_scope() as session:
-            update_draft_task(session, task_id, values)
-            refreshed = latest_draft(session)
-            if refreshed:
-                drafts = [TaskDraft(owner_agent=item.owner_agent, task_type=item.task_type, title=item.title, description=item.description, location=item.location, priority=item.priority, start_at=item.start_at, due_at=item.due_at, estimated_minutes=item.estimated_minutes) for item in refreshed.tasks]
-                warnings = [item for item in (refreshed.conflict_summary or []) if item.startswith("工具提示：")]
-                replace_plan_conflicts(session, refreshed, detect_conflicts(drafts) + warnings)
-        st.session_state["editing_task_id"] = None
-        set_flash("计划修改已保存，卡片已收起。")
-    except Exception as exc:
-        set_flash(f"保存失败：{exc}", "error")
+        for task in plan.tasks
+    ]
 
 
-def confirm_plan_callback(plan_id: int) -> None:
+def confirm_plan_in_chat_callback(plan_id: int, conversation_id: int) -> None:
     try:
         with session_scope() as session:
+            plan = get_plan(session, plan_id)
+            if not plan:
+                raise ValueError("计划不存在")
+            rows = plan_rows(plan)
             confirm_plan(session, plan_id)
-        set_flash("计划已确认并进入今日任务。")
+            add_message(session, conversation_id, "assistant", encouraging_summary(rows))
+        set_flash("计划已确认，今日任务已经生成。")
     except Exception as exc:
         set_flash(f"确认失败：{exc}", "error")
 
@@ -308,6 +295,12 @@ with center:
         conversation = get_or_create_conversation(session)
         conversation_id = conversation.id
         history = [(message.role, message.content, message.created_at) for message in recent_messages(session, conversation_id, limit=50)]
+        draft = latest_draft(session)
+        draft_data = (
+            {"id": draft.id, "conflicts": list(draft.conflict_summary or []), "tasks": plan_rows(draft)}
+            if draft
+            else None
+        )
     chat_window = st.container(height=360, border=True)
     with chat_window:
         if not history:
@@ -316,99 +309,103 @@ with center:
             with st.chat_message(role if role in ["user", "assistant"] else "assistant"):
                 st.write(content)
                 st.caption(created_at.strftime("%Y-%m-%d %H:%M"))
+        if draft_data:
+            blocking = [item for item in draft_data["conflicts"] if not item.startswith("工具提示：")]
+            st.caption("当前计划正在等待你的确认或修改。")
+            st.button(
+                "确认计划并生成今日任务",
+                type="primary",
+                disabled=bool(blocking),
+                key=f"chat_confirm_{draft_data['id']}",
+                on_click=confirm_plan_in_chat_callback,
+                args=(draft_data["id"], conversation_id),
+                use_container_width=True,
+            )
+
+    def show_chat_message(role: str, content: str, created_at: datetime) -> None:
+        with chat_window:
+            with st.chat_message(role):
+                st.write(content)
+                st.caption(created_at.strftime("%Y-%m-%d %H:%M"))
+
+    def save_assistant_message(content: str):
+        with session_scope() as session:
+            message = add_message(session, conversation_id, "assistant", content)
+        show_chat_message("assistant", content, message.created_at)
+        return message
+
     prompt = st.chat_input("告诉系统你今天想完成什么……")
     if prompt:
         with session_scope() as session:
             user_message = add_message(session, conversation_id, "user", prompt)
-        with chat_window:
-            with st.chat_message("user"):
-                st.write(prompt)
-                st.caption(user_message.created_at.strftime("%Y-%m-%d %H:%M"))
-        st.session_state["agent_trace"] = []
-        with st.spinner("Agent 团队正在生成计划……", show_time=True):
-            def show_agent_progress(agent: str, message: str) -> None:
-                labels = {"leader": "Leader", "learning": "Learning Agent", "life": "Life Agent", "scheduler": "排期与冲突检查"}
-                st.session_state["agent_trace"].append({"label": labels.get(agent, agent), "message": message})
-                render_agent_trace()
+        show_chat_message("user", prompt, user_message.created_at)
 
-            generated = PlannerOrchestrator().generate(prompt, progress=show_agent_progress)
-        with st.spinner("正在保存计划草稿……"):
-            with session_scope() as session:
-                save_generated_plan(session, generated)
-                task_names = "、".join(task.title for task in generated.tasks)
-                assistant_text = f"已生成计划草稿：{task_names}。请检查时间与内容后确认。"
-                assistant_message = add_message(session, conversation_id, "assistant", assistant_text)
-        with chat_window:
-            with st.chat_message("assistant"):
-                st.write(assistant_text)
-                st.caption(assistant_message.created_at.strftime("%Y-%m-%d %H:%M"))
-
-    with session_scope() as session:
-        draft = latest_draft(session)
-        if draft:
-            draft_data = {
-                "id": draft.id,
-                "conflicts": list(draft.conflict_summary or []),
-                "tasks": [
-                    {
-                        "id": task.id,
-                        "title": task.title,
-                        "type": task.task_type,
-                        "start": task.start_at,
-                        "due": task.due_at,
-                        "minutes": task.estimated_minutes,
-                        "priority": task.priority,
-                        "description": task.description,
-                        "learning": (
-                            {
-                                "goal": task.learning_record.learning_goal,
-                                "summary": task.learning_record.material_summary,
-                                "criteria": task.learning_record.completion_criteria,
-                                "sources": task.learning_record.sources_json,
-                            }
-                            if task.learning_record
-                            else None
-                        ),
-                    }
-                    for task in draft.tasks
-                ],
-            }
-        else:
-            draft_data = None
-
-    if draft_data:
-        st.markdown("#### 待确认计划")
-        blocking = [item for item in draft_data["conflicts"] if not item.startswith("工具提示：")]
-        for conflict in draft_data["conflicts"]:
-            (st.error if conflict in blocking else st.warning)(conflict)
-        editing_task_id = st.session_state.get("editing_task_id")
-        for task in sorted(draft_data["tasks"], key=lambda item: item["start"]):
-            if editing_task_id == task["id"]:
-                with st.expander(f"正在修改 · {task['title']}", expanded=True):
-                    with st.form(f"edit_task_{task['id']}"):
-                        st.text_input("任务名称", task["title"], key=f"draft_title_{task['id']}")
-                        c1, c2 = st.columns(2)
-                        c1.time_input("开始时间", task["start"].time(), key=f"draft_start_{task['id']}")
-                        c2.time_input("截止时间", task["due"].time(), key=f"draft_due_{task['id']}")
-                        st.number_input("预计时长（分钟）", min_value=5, max_value=720, value=task["minutes"], step=5, key=f"draft_duration_{task['id']}")
-                        st.selectbox("优先级", ["high", "medium", "low"], index=["high", "medium", "low"].index(task["priority"]), key=f"draft_priority_{task['id']}")
-                        save_col, cancel_col = st.columns(2)
-                        save_col.form_submit_button("保存修改", on_click=save_draft_task_callback, args=(task["id"], task["start"].date()), use_container_width=True)
-                        cancel_col.form_submit_button("取消", on_click=stop_editing_task, use_container_width=True)
+        if draft_data:
+            blocking = [item for item in draft_data["conflicts"] if not item.startswith("工具提示：")]
+            if is_plan_confirmation(prompt):
+                if blocking:
+                    save_assistant_message("当前计划仍有时间冲突，请先告诉我如何调整：\n\n" + "\n".join(f"- {item}" for item in blocking))
+                else:
+                    with session_scope() as session:
+                        plan = get_plan(session, draft_data["id"])
+                        rows = plan_rows(plan)
+                        confirm_plan(session, draft_data["id"])
+                        add_message(session, conversation_id, "assistant", encouraging_summary(rows))
+                    st.rerun()
             else:
-                with st.container(border=True):
-                    st.markdown(f"**{task['start']:%H:%M}–{task['due']:%H:%M} · {task['title']}**")
-                    st.caption(f"{task['minutes']} 分钟 · {task['priority']} · 点击修改后展开表单")
-                    st.write(task["description"])
-                    if task["learning"]:
-                        st.markdown("**学习目标**")
-                        st.write(task["learning"]["goal"])
-                        st.markdown("**材料摘要**")
-                        st.write(task["learning"]["summary"])
-                        for source in task["learning"]["sources"]:
-                            st.markdown(f"- [{source['title']}]({source['url']}) · {source['source']}")
-                    st.button("修改此任务", key=f"open_edit_{task['id']}", on_click=start_editing_task, args=(task["id"],), use_container_width=True)
-        st.button("确认整份计划", type="primary", disabled=bool(blocking), use_container_width=True, on_click=confirm_plan_callback, args=(draft_data["id"],))
+                task_id, changes, clarification = parse_plan_change(prompt, draft_data["tasks"])
+                if not changes:
+                    st.session_state["agent_trace"] = [{"label": "Leader", "message": "识别为计划修改，但信息不足，未调用子 Agent"}]
+                    render_agent_trace()
+                    save_assistant_message(clarification)
+                else:
+                    with session_scope() as session:
+                        update_draft_task(session, task_id, changes)
+                        refreshed = latest_draft(session)
+                        drafts = [TaskDraft(owner_agent=item.owner_agent, task_type=item.task_type, title=item.title, description=item.description, location=item.location, priority=item.priority, start_at=item.start_at, due_at=item.due_at, estimated_minutes=item.estimated_minutes) for item in refreshed.tasks]
+                        warnings = [item for item in (refreshed.conflict_summary or []) if item.startswith("工具提示：")]
+                        replace_plan_conflicts(session, refreshed, detect_conflicts(drafts) + warnings)
+                        revised_rows = plan_rows(refreshed)
+                        assistant_text = plan_text(revised_rows, "已按你的要求修改计划：")
+                        add_message(session, conversation_id, "assistant", assistant_text)
+                    st.session_state["agent_trace"] = [{"label": "Leader", "message": "已在本地完成计划修改，未重复调用资讯与天气工具"}]
+                    render_agent_trace()
+                    st.rerun()
+        else:
+            actionable, clarification = assess_plan_request(prompt)
+            if not actionable:
+                st.session_state["agent_trace"] = [{"label": "Leader", "message": "输入信息不足，已停止路由并向用户追问"}]
+                render_agent_trace()
+                save_assistant_message(clarification)
+            else:
+                st.session_state["agent_trace"] = []
+                with st.spinner("Agent 团队正在生成计划……", show_time=True):
+                    def show_agent_progress(agent: str, message: str) -> None:
+                        labels = {"leader": "Leader", "learning": "Learning Agent", "life": "Life Agent", "scheduler": "排期与冲突检查"}
+                        st.session_state["agent_trace"].append({"label": labels.get(agent, agent), "message": message})
+                        render_agent_trace()
+
+                    generated = PlannerOrchestrator().generate(prompt, progress=show_agent_progress)
+                with st.spinner("正在保存计划草稿……"):
+                    with session_scope() as session:
+                        saved_plan = save_generated_plan(session, generated)
+                        generated_rows = plan_rows(saved_plan)
+                        assistant_text = plan_text(generated_rows)
+                        if generated.conflicts:
+                            assistant_text += "\n\n提示：\n" + "\n".join(f"- {item}" for item in generated.conflicts)
+                        assistant_message = add_message(session, conversation_id, "assistant", assistant_text)
+                show_chat_message("assistant", assistant_text, assistant_message.created_at)
+                blocking = [item for item in generated.conflicts if not item.startswith("工具提示：")]
+                with chat_window:
+                    st.button(
+                        "确认计划并生成今日任务",
+                        type="primary",
+                        disabled=bool(blocking),
+                        key=f"chat_confirm_new_{saved_plan.id}",
+                        on_click=confirm_plan_in_chat_callback,
+                        args=(saved_plan.id, conversation_id),
+                        use_container_width=True,
+                    )
 
 
 st.divider()
