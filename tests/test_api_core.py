@@ -1,5 +1,8 @@
 import asyncio
 
+from fastapi.testclient import TestClient
+
+from app.api import app, login_failures
 from app.auth import issue_access_token, verify_access_token
 from app.jobs import JobManager
 
@@ -25,3 +28,16 @@ def test_job_manager_replays_events_and_completes():
         assert events[-1].data["plan_id"] == 7
 
     asyncio.run(scenario())
+
+
+def test_login_rate_limit_and_security_headers():
+    login_failures.clear()
+    client = TestClient(app)
+    for _ in range(5):
+        assert client.post("/api/auth/login", json={"password": "definitely-wrong"}).status_code == 401
+    blocked = client.post("/api/auth/login", json={"password": "definitely-wrong"})
+    assert blocked.status_code == 429
+    health = client.get("/api/health")
+    assert health.headers["x-content-type-options"] == "nosniff"
+    assert health.headers["x-frame-options"] == "DENY"
+    login_failures.clear()

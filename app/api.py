@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
+from collections import defaultdict, deque
 from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Callable
@@ -66,6 +69,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 security = HTTPBearer(auto_error=False)
+login_failures: dict[str, deque[float]] = defaultdict(deque)
+login_failure_lock = threading.Lock()
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; connect-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'self'; frame-ancestors 'none'"
+    )
+    if request.headers.get("x-forwarded-proto", "").lower() == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    return response
 
 
 @app.on_event("startup")
@@ -232,9 +253,25 @@ def health() -> dict:
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest) -> dict:
+def login(payload: LoginRequest, request: Request) -> dict:
+    client_key = request.client.host if request.client else "unknown"
+    now = time.monotonic()
+    with login_failure_lock:
+        failures = login_failures[client_key]
+        while failures and now - failures[0] > settings.login_window_seconds:
+            failures.popleft()
+        if len(failures) >= settings.login_max_attempts:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="登录失败次数过多，请稍后再试",
+                headers={"Retry-After": str(settings.login_window_seconds)},
+            )
     if not verify_password(payload.password):
+        with login_failure_lock:
+            login_failures[client_key].append(now)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="密码错误")
+    with login_failure_lock:
+        login_failures.pop(client_key, None)
     return {"access_token": issue_access_token(), "token_type": "bearer"}
 
 

@@ -20,6 +20,8 @@ class Settings:
     default_city: str = "北京"
     max_agent_calls: int = 3
     auth_token_ttl_seconds: int = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", "604800"))
+    login_max_attempts: int = int(os.getenv("LOGIN_MAX_ATTEMPTS", "5"))
+    login_window_seconds: int = int(os.getenv("LOGIN_WINDOW_SECONDS", "900"))
     frontend_origins: str = os.getenv("FRONTEND_ORIGINS", "http://localhost:5173")
     feishu_app_id: str = os.getenv("FEISHU_APP_ID", "")
     feishu_app_secret: str = os.getenv("FEISHU_APP_SECRET", "")
