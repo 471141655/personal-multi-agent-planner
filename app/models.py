@@ -143,3 +143,43 @@ class TaskChangeLog(Base):
     after_json: Mapped[dict] = mapped_column(JSON, default=dict)
     confirmed_by_user: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)
+
+
+class ChannelEvent(Base):
+    __tablename__ = "channel_events"
+    __table_args__ = (UniqueConstraint("channel", "external_event_id", name="uq_channel_event"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel: Mapped[str] = mapped_column(String(30), index=True)
+    external_event_id: Mapped[str] = mapped_column(String(200), index=True)
+    event_type: Mapped[str] = mapped_column(String(100), default="")
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(30), default="RECEIVED", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class OutboundNotification(Base):
+    __tablename__ = "outbound_notifications"
+    __table_args__ = (UniqueConstraint("channel", "kind", "reference_key", name="uq_outbound_notification"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel: Mapped[str] = mapped_column(String(30), index=True)
+    recipient: Mapped[str] = mapped_column(String(200))
+    kind: Mapped[str] = mapped_column(String(50), index=True)
+    reference_key: Mapped[str] = mapped_column(String(200))
+    payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)
+
+
+class ChannelState(Base):
+    __tablename__ = "channel_states"
+    __table_args__ = (UniqueConstraint("channel", "external_user_id", name="uq_channel_state"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel: Mapped[str] = mapped_column(String(30), index=True)
+    external_user_id: Mapped[str] = mapped_column(String(200), index=True)
+    pending_request: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_local)

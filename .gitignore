@@ -6,3 +6,10 @@ pytest-cache-files-*/
 *.py[cod]
 data/*.db
 data/*.db-*
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+.tmp-*.db
+.tmp-*.db-*

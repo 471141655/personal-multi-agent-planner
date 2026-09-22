@@ -19,8 +19,15 @@ class Settings:
     timezone: str = os.getenv("APP_TIMEZONE", "Asia/Shanghai")
     default_city: str = "北京"
     max_agent_calls: int = 3
+    auth_token_ttl_seconds: int = int(os.getenv("AUTH_TOKEN_TTL_SECONDS", "604800"))
+    frontend_origins: str = os.getenv("FRONTEND_ORIGINS", "http://localhost:5173")
+    feishu_app_id: str = os.getenv("FEISHU_APP_ID", "")
+    feishu_app_secret: str = os.getenv("FEISHU_APP_SECRET", "")
+    feishu_verification_token: str = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+    feishu_owner_open_id: str = os.getenv("FEISHU_OWNER_OPEN_ID", "")
+    review_reminder_time: str = os.getenv("REVIEW_REMINDER_TIME", "22:00")
+    worker_poll_seconds: int = int(os.getenv("WORKER_POLL_SECONDS", "30"))
 
 
 def get_settings() -> Settings:
     return Settings()
-

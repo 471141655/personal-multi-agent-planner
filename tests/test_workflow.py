@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.models import Base, Message, Reminder, User
-from app.repository import auto_fail_overdue_tasks, confirm_plan, due_reminders, ensure_rollover_prompt, expire_stale_drafts, get_or_create_conversation, learning_progress_summary, save_generated_plan, set_task_result, submit_quiz, supersede_plan
+from app.repository import auto_fail_overdue_tasks, confirm_plan, due_reminders, enqueue_notification, ensure_rollover_prompt, expire_stale_drafts, get_channel_state, get_or_create_conversation, learning_progress_summary, pending_notifications, record_channel_event, save_generated_plan, set_channel_pending_request, set_task_result, submit_quiz, supersede_plan
 from app.schemas import GeneratedPlan, LearningOutput, QuizQuestion, TaskDraft
 
 
@@ -135,3 +135,20 @@ def test_old_draft_is_expired_and_current_draft_can_be_superseded():
     supersede_plan(session, saved_current.id)
     session.commit()
     assert saved_current.status == "SUPERSEDED"
+
+
+def test_channel_events_state_and_notifications_are_idempotent():
+    session = make_session()
+    first = record_channel_event(session, "feishu", "event-1", "message", {"hello": "world"})
+    assert first is not None
+    assert record_channel_event(session, "feishu", "event-1", "message", {}) is None
+
+    state = get_channel_state(session, "feishu", "open-id")
+    assert state.pending_request == ""
+    set_channel_pending_request(session, "feishu", "open-id", "明天运动")
+    assert state.pending_request == "明天运动"
+
+    first_notification = enqueue_notification(session, "feishu", "open-id", "TEST", "task:1", {"text": "hello"})
+    second_notification = enqueue_notification(session, "feishu", "open-id", "TEST", "task:1", {"text": "duplicate"})
+    assert first_notification.id == second_notification.id
+    assert len(pending_notifications(session)) == 1

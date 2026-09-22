@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import and_, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import AgentRun, Conversation, DailyReview, LearningRecord, Message, Plan, Reminder, Task, TaskChangeLog
+from app.models import AgentRun, ChannelEvent, ChannelState, Conversation, DailyReview, LearningRecord, Message, OutboundNotification, Plan, Reminder, Task, TaskChangeLog
 from app.schemas import GeneratedPlan, ReviewOutput, TaskDraft
 from app.timeutils import now_local
 
@@ -394,3 +394,117 @@ def task_snapshot(task: Task) -> dict:
         "priority": task.priority,
         "status": task.status,
     }
+
+
+def record_channel_event(session: Session, channel: str, external_event_id: str, event_type: str, payload: dict) -> ChannelEvent | None:
+    existing = session.scalar(
+        select(ChannelEvent).where(ChannelEvent.channel == channel, ChannelEvent.external_event_id == external_event_id)
+    )
+    if existing:
+        return None
+    event = ChannelEvent(channel=channel, external_event_id=external_event_id, event_type=event_type, payload_json=payload)
+    session.add(event)
+    session.flush()
+    return event
+
+
+def mark_channel_event_processed(session: Session, event_id: int, status: str = "PROCESSED") -> None:
+    event = session.get(ChannelEvent, event_id)
+    if event:
+        event.status = status
+        event.processed_at = now_local()
+        session.flush()
+
+
+def get_channel_state(session: Session, channel: str, external_user_id: str) -> ChannelState:
+    state = session.scalar(
+        select(ChannelState).where(ChannelState.channel == channel, ChannelState.external_user_id == external_user_id)
+    )
+    if state is None:
+        state = ChannelState(channel=channel, external_user_id=external_user_id)
+        session.add(state)
+        session.flush()
+    return state
+
+
+def set_channel_pending_request(session: Session, channel: str, external_user_id: str, pending_request: str) -> None:
+    state = get_channel_state(session, channel, external_user_id)
+    state.pending_request = pending_request
+    state.updated_at = now_local()
+    session.flush()
+
+
+def enqueue_notification(
+    session: Session,
+    channel: str,
+    recipient: str,
+    kind: str,
+    reference_key: str,
+    payload: dict,
+) -> OutboundNotification:
+    existing = session.scalar(
+        select(OutboundNotification).where(
+            OutboundNotification.channel == channel,
+            OutboundNotification.kind == kind,
+            OutboundNotification.reference_key == reference_key,
+        )
+    )
+    if existing:
+        return existing
+    notification = OutboundNotification(
+        channel=channel,
+        recipient=recipient,
+        kind=kind,
+        reference_key=reference_key,
+        payload_json=payload,
+    )
+    session.add(notification)
+    session.flush()
+    return notification
+
+
+def pending_notifications(session: Session, now: datetime | None = None, limit: int = 20) -> list[OutboundNotification]:
+    now = now or now_local()
+    return list(
+        session.scalars(
+            select(OutboundNotification)
+            .where(OutboundNotification.status == "PENDING", OutboundNotification.next_attempt_at <= now)
+            .order_by(OutboundNotification.created_at)
+            .limit(limit)
+        )
+    )
+
+
+def mark_notification_sent(session: Session, notification_id: int) -> None:
+    notification = session.get(OutboundNotification, notification_id)
+    if notification:
+        notification.status = "SENT"
+        notification.updated_at = now_local()
+        session.flush()
+
+
+def mark_notification_failed(session: Session, notification_id: int, error: str) -> None:
+    notification = session.get(OutboundNotification, notification_id)
+    if notification:
+        notification.attempts += 1
+        notification.last_error = error[:1000]
+        notification.updated_at = now_local()
+        if notification.attempts >= 5:
+            notification.status = "FAILED"
+        else:
+            notification.next_attempt_at = now_local() + timedelta(minutes=min(30, 2 ** notification.attempts))
+        session.flush()
+
+
+def ensure_daily_review_prompt(session: Session, conversation_id: int, target_date: date) -> Message | None:
+    prefix = f"🌙 今日复盘提醒（{target_date.isoformat()}）："
+    existing = session.scalar(
+        select(Message.id).where(
+            Message.conversation_id == conversation_id,
+            Message.role == "assistant",
+            Message.content.like(f"{prefix}%"),
+        )
+    )
+    if existing:
+        return None
+    return add_message(session, conversation_id, "assistant", f"{prefix}今天辛苦了。输入“生成今日复盘”即可开始。")
