@@ -104,6 +104,19 @@ FEISHU_OWNER_OPEN_ID = "ou_..."
 
 `docker-compose.yml` 可用于本地或单台服务器快速启动。若平台把 API 与 Worker 拆成两个服务，应分别使用 `uvicorn app.api:app --host 0.0.0.0 --port 8000 --workers 1` 与 `python -m app.worker`。
 
+### Railway 单服务低成本部署
+
+仓库包含 `railway.toml` 和 `app.railway` 启动入口。Railway 部署时会运行一个 Uvicorn 进程，并在同一容器中启动一个守护 Worker 线程，以减少个人 MVP 的服务数量和费用。
+
+1. 在 Railway 使用 GitHub 仓库创建项目。
+2. 选择 Hobby 计划并设置消费上限提醒。
+3. 添加 `DATABASE_URL`、`DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL`、`APP_PASSWORD` 和 `APP_TIMEZONE`。
+4. 在 Networking 中生成 Railway Domain。
+5. 将 `FRONTEND_ORIGINS` 设置为生成的 HTTPS 域名。
+6. 健康检查 `/api/health` 通过后，再配置飞书变量和回调地址。
+
+Railway 必须保持单副本；当前 SSE Job 状态存储在 API 内存中，多个副本会导致事件流无法找到对应 Job。生产规模扩大后应改用 Redis/任务队列并重新拆分 Worker。
+
 ## Streamlit 公网回退版
 
 现有 Streamlit Community Cloud 应用可以继续使用：在应用设置中选择 `streamlit_app.py`，并保留已有 Secrets。它不会提供 React、SSE、Worker 或飞书入口，仅作为迁移期间的稳定回退版本。

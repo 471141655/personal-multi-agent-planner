@@ -57,6 +57,7 @@ from app.repository import (
 )
 from app.schemas import TaskDraft
 from app.timeutils import today_local
+from app.worker import start_embedded_worker
 
 
 settings = get_settings()
@@ -92,6 +93,8 @@ async def security_headers(request: Request, call_next):
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    if settings.run_embedded_worker:
+        start_embedded_worker()
 
 
 class LoginRequest(BaseModel):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import threading
 from datetime import datetime
 
 from app.config import get_settings
@@ -79,7 +80,7 @@ def run_once() -> dict:
     return {"overdue": overdue_count, "review_prompted": review_prompted, "sent": sent, "failed": failed}
 
 
-def main() -> None:
+def run_forever() -> None:
     init_db()
     settings = get_settings()
     while True:
@@ -88,6 +89,25 @@ def main() -> None:
         except Exception as exc:
             print(f"worker cycle failed: {exc}", flush=True)
         time.sleep(max(5, settings.worker_poll_seconds))
+
+
+_embedded_thread: threading.Thread | None = None
+_embedded_lock = threading.Lock()
+
+
+def start_embedded_worker() -> threading.Thread:
+    """Start one daemon worker for single-process hosting platforms."""
+    global _embedded_thread
+    with _embedded_lock:
+        if _embedded_thread and _embedded_thread.is_alive():
+            return _embedded_thread
+        _embedded_thread = threading.Thread(target=run_forever, name="planner-worker", daemon=True)
+        _embedded_thread.start()
+        return _embedded_thread
+
+
+def main() -> None:
+    run_forever()
 
 
 if __name__ == "__main__":

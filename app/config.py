@@ -29,6 +29,7 @@ class Settings:
     feishu_owner_open_id: str = os.getenv("FEISHU_OWNER_OPEN_ID", "")
     review_reminder_time: str = os.getenv("REVIEW_REMINDER_TIME", "22:00")
     worker_poll_seconds: int = int(os.getenv("WORKER_POLL_SECONDS", "30"))
+    run_embedded_worker: bool = os.getenv("RUN_EMBEDDED_WORKER", "false").lower() in {"1", "true", "yes", "on"}
 
 
 def get_settings() -> Settings:

@@ -1,10 +1,12 @@
 import asyncio
+import threading
 
 from fastapi.testclient import TestClient
 
 from app.api import app, login_failures
 from app.auth import issue_access_token, verify_access_token
 from app.jobs import JobManager
+import app.worker as worker_module
 
 
 def test_access_token_round_trip_and_tamper(monkeypatch):
@@ -32,6 +34,24 @@ def test_job_manager_replays_events_and_completes():
 
 def test_login_rate_limit_and_security_headers():
     login_failures.clear()
+
+
+def test_embedded_worker_starts_only_once(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    def fake_worker():
+        started.set()
+        release.wait(timeout=1)
+
+    monkeypatch.setattr(worker_module, "run_forever", fake_worker)
+    monkeypatch.setattr(worker_module, "_embedded_thread", None)
+    first = worker_module.start_embedded_worker()
+    assert started.wait(timeout=1)
+    second = worker_module.start_embedded_worker()
+    release.set()
+    first.join(timeout=1)
+    assert second is first
     client = TestClient(app)
     for _ in range(5):
         assert client.post("/api/auth/login", json={"password": "definitely-wrong"}).status_code == 401
